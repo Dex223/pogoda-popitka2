@@ -164,7 +164,7 @@ function weatherSvg(code) {
   return WEATHER_SVG[95];
 }
 
-// === МОКОВЫЕ ДАННЫЕ (fallback если API не отвечает) ===
+// === МОКОВЫЕ ДАННЫЕ ===
 function getMockWeather() {
   const now = new Date();
   const hourlyTimes = [];
@@ -223,19 +223,14 @@ const state = {
   error: null,
   lastUpdate: null,
   isDemo: false,
+  apiSource: 'неизвестно',
   tab: 'today'
 };
 
-// === API С ПРОВЕРКОЙ И FALLBACK ===
-async function fetchWeatherAPI(lat, lon) {
+// === API: Open-Meteo (основной) ===
+async function fetchOpenMeteo(lat, lon) {
+  console.log('[API-1] Open-Meteo: начинаем запрос...');
   const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m&hourly=temperature_2m,weather_code,visibility&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,wind_speed_10m_max&timezone=auto&forecast_days=7&wind_speed_unit=ms`;
-  
-  console.log('[API] Запрос:', url);
-  
-  // Проверяем соединение
-  if (!navigator.onLine) {
-    throw new Error('Нет подключения к интернету');
-  }
   
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 8000);
@@ -243,71 +238,146 @@ async function fetchWeatherAPI(lat, lon) {
   try {
     const r = await fetch(url, { signal: controller.signal });
     clearTimeout(timeout);
-    console.log('[API] Статус:', r.status);
+    console.log('[API-1] Open-Meteo: статус', r.status);
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const data = await r.json();
-    console.log('[API] Данные получены:', data);
-    return data;
+    console.log('[API-1] Open-Meteo: успех!');
+    return { data, source: 'Open-Meteo' };
   } catch (e) {
     clearTimeout(timeout);
-    console.error('[API] Ошибка:', e);
+    console.error('[API-1] Open-Meteo: ошибка -', e.message);
     throw e;
   }
 }
 
-async function searchCitiesAPI(q) {
-  const url = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(q)}&count=8&language=ru&format=json`;
-  const r = await fetch(url);
-  if (!r.ok) throw new Error('Search error');
-  return (await r.json()).results || [];
+// === API: wttr.in (запасной) ===
+async function fetchWttrIn(cityName) {
+  console.log('[API-2] wttr.in: начинаем запрос для', cityName);
+  const url = `https://wttr.in/${encodeURIComponent(cityName)}?format=j1&lang=ru`;
+  
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8000);
+  
+  try {
+    const r = await fetch(url, { signal: controller.signal });
+    clearTimeout(timeout);
+    console.log('[API-2] wttr.in: статус', r.status);
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const data = await r.json();
+    console.log('[API-2] wttr.in: успех!');
+    
+    // Преобразуем формат wttr.in в наш формат
+    const current = data.current_condition[0];
+    const weatherCode = parseInt(current.weatherCode) || 3;
+    
+    const hourlyTimes = [];
+    const hourlyTemps = [];
+    const hourlyCodes = [];
+    const hourlyVis = [];
+    if (data.weather && data.weather[0] && data.weather[0].hourly) {
+      data.weather[0].hourly.forEach(h => {
+        hourlyTimes.push(h.time.padStart(4, '0'));
+        hourlyTemps.push(parseInt(h.tempC));
+        hourlyCodes.push(parseInt(h.weatherCode) || 3);
+        hourlyVis.push(parseInt(h.visibility) * 1000);
+      });
+    }
+    
+    const dailyTimes = [];
+    const dailyMax = [];
+    const dailyMin = [];
+    const dailyCodes = [];
+    const dailyPrecip = [];
+    const dailyWind = [];
+    if (data.weather) {
+      data.weather.forEach(day => {
+        dailyTimes.push(day.date);
+        dailyMax.push(parseInt(day.maxtempC));
+        dailyMin.push(parseInt(day.mintempC));
+        dailyCodes.push(parseInt(day.hourly[4]?.weatherCode) || 3);
+        dailyPrecip.push(parseInt(day.hourly[4]?.chanceofrain) || 0);
+        dailyWind.push(parseInt(day.maxwindKmph) / 3.6);
+      });
+    }
+    
+    return {
+      data: {
+        current: {
+          time: new Date().toISOString().slice(0, 13) + ':00',
+          temperature_2m: parseInt(current.temp_C),
+          relative_humidity_2m: parseInt(current.humidity),
+          apparent_temperature: parseInt(current.FeelsLikeC),
+          weather_code: weatherCode,
+          wind_speed_10m: parseInt(current.windspeedKmph) / 3.6
+        },
+        hourly: {
+          time: hourlyTimes.length ? hourlyTimes : [new Date().toISOString().slice(0, 13) + ':00'],
+          temperature_2m: hourlyTemps.length ? hourlyTemps : [parseInt(current.temp_C)],
+          weather_code: hourlyCodes.length ? hourlyCodes : [weatherCode],
+          visibility: hourlyVis.length ? hourlyVis : [10000]
+        },
+        daily: {
+          time: dailyTimes.length ? dailyTimes : [new Date().toISOString().slice(0, 10)],
+          temperature_2m_max: dailyMax.length ? dailyMax : [parseInt(current.temp_C)],
+          temperature_2m_min: dailyMin.length ? dailyMin : [parseInt(current.temp_C) - 3],
+          weather_code: dailyCodes.length ? dailyCodes : [weatherCode],
+          precipitation_probability_max: dailyPrecip.length ? dailyPrecip : [0],
+          wind_speed_10m_max: dailyWind.length ? dailyWind : [parseInt(current.windspeedKmph) / 3.6]
+        }
+      },
+      source: 'wttr.in'
+    };
+  } catch (e) {
+    clearTimeout(timeout);
+    console.error('[API-2] wttr.in: ошибка -', e.message);
+    throw e;
+  }
 }
 
-function weatherText(code) {
-  const map = {
-    0: 'Ясно', 1: 'Преимущественно ясно', 2: 'Переменная облачность', 3: 'Пасмурно',
-    45: 'Туман', 48: 'Иней', 51: 'Лёгкая морось', 53: 'Морось', 55: 'Сильная морось',
-    61: 'Слабый дождь', 63: 'Дождь', 65: 'Сильный дождь',
-    71: 'Слабый снег', 73: 'Снег', 75: 'Сильный снег', 95: 'Гроза'
-  };
-  return map[code] || 'Неизвестно';
-}
-
-function fmtTemp(v) {
-  if (v == null) return '—';
-  const r = Math.round(v);
-  return (r < 0 ? '−' + Math.abs(r) : r > 0 ? '+' + r : '0') + '°';
-}
-
-function dayLabel(dateStr, i) {
-  if (i === 0) return 'Сегодня';
-  if (i === 1) return 'Завтра';
-  return new Date(dateStr + 'T12:00:00')
-    .toLocaleDateString('ru-RU', { weekday: 'long' })
-    .replace(/^./, c => c.toUpperCase());
-}
-
+// === ЗАГРУЗКА ПОГОДЫ С АВТОПЕРЕКЛЮЧЕНИЕМ ===
 async function loadWeather() {
   state.loading = true;
   state.error = null;
   render();
   
+  let apiResult = null;
+  let lastError = null;
+  
+  // Пробуем Open-Meteo
   try {
-    const data = await fetchWeatherAPI(state.city.lat, state.city.lon);
-    state.weather = data;
+    apiResult = await fetchOpenMeteo(state.city.lat, state.city.lon);
+  } catch (e) {
+    lastError = e;
+    console.warn('[FALLBACK] Open-Meteo не сработал, пробуем wttr.in...');
+    
+    // Пробуем wttr.in
+    try {
+      apiResult = await fetchWttrIn(state.city.name);
+    } catch (e2) {
+      lastError = e2;
+      console.error('[FALLBACK] wttr.in тоже не сработал:', e2.message);
+    }
+  }
+  
+  if (apiResult) {
+    state.weather = apiResult.data;
+    state.apiSource = apiResult.source;
     state.isDemo = false;
     state.lastUpdate = new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
-    try { localStorage.setItem('weather_city', JSON.stringify(state.city)); } catch(e){}
-    console.log('[OK] Погода загружена с API');
-  } catch (e) {
-    console.warn('[FALLBACK] API недоступен, используем демо-данные:', e.message);
+    console.log('[OK] Погода загружена с', apiResult.source);
+  } else {
+    console.warn('[DEMO] Оба API не сработали, используем демо-данные');
     state.weather = getMockWeather();
+    state.apiSource = 'демо';
     state.isDemo = true;
     state.lastUpdate = 'демо';
-    state.error = null; // Не показываем ошибку, показываем демо
-  } finally {
-    state.loading = false;
-    render();
+    state.error = null;
   }
+  
+  try { localStorage.setItem('weather_city', JSON.stringify(state.city)); } catch(e){}
+  
+  state.loading = false;
+  render();
 }
 
 function render() {
@@ -362,7 +432,7 @@ function renderToday() {
     '<div class="daily-list">' +
     daily.time.map((d, i) => '<div class="daily-item"><div class="day-name">' + dayLabel(d, i) + '</div><div class="day-icon">' + weatherSvg(daily.weather_code[i]) + '</div><div class="day-desc">' + weatherText(daily.weather_code[i]) + '</div><div class="day-temps"><span>' + fmtTemp(daily.temperature_2m_max[i]) + '</span><span class="temp-low">' + fmtTemp(daily.temperature_2m_min[i]) + '</span></div></div>').join('') +
     '</div>' +
-    '<div class="status">' + (state.isDemo ? '<span class="demo-dot"></span>Демо-режим · ' : '<span class="live-dot"></span>Live · ') + 'Обновлено: ' + (state.lastUpdate || '—') + '</div>';
+    '<div class="status">' + getStatusDot() + state.apiSource + ' · Обновлено: ' + (state.lastUpdate || '—') + '</div>';
 }
 
 function renderForecast() {
@@ -389,7 +459,7 @@ function renderForecast() {
     '<div class="daily-item"><div class="day-desc" style="flex:1">Максимальный ветер</div><div class="day-temps">' + maxWind + ' м/с</div></div>' +
     '<div class="daily-item"><div class="day-desc" style="flex:1">Мин. температура</div><div class="day-temps">' + fmtTemp(minTemp) + '</div></div>' +
     '</div>' +
-    '<div class="status">' + (state.isDemo ? '<span class="demo-dot"></span>Демо-режим · ' : '<span class="live-dot"></span>Live · ') + 'Обновлено: ' + (state.lastUpdate || '—') + '</div>';
+    '<div class="status">' + getStatusDot() + state.apiSource + ' · Обновлено: ' + (state.lastUpdate || '—') + '</div>';
 }
 
 function renderCities() {
@@ -414,6 +484,35 @@ function renderCities() {
     '</div><div class="status">Нажмите на город, чтобы выбрать его</div>';
 }
 
+function getStatusDot() {
+  if (state.isDemo) return '<span class="demo-dot"></span>';
+  return '<span class="live-dot"></span>';
+}
+
+function weatherText(code) {
+  const map = {
+    0: 'Ясно', 1: 'Преимущественно ясно', 2: 'Переменная облачность', 3: 'Пасмурно',
+    45: 'Туман', 48: 'Иней', 51: 'Лёгкая морось', 53: 'Морось', 55: 'Сильная морось',
+    61: 'Слабый дождь', 63: 'Дождь', 65: 'Сильный дождь',
+    71: 'Слабый снег', 73: 'Снег', 75: 'Сильный снег', 95: 'Гроза'
+  };
+  return map[code] || 'Неизвестно';
+}
+
+function fmtTemp(v) {
+  if (v == null) return '—';
+  const r = Math.round(v);
+  return (r < 0 ? '−' + Math.abs(r) : r > 0 ? '+' + r : '0') + '°';
+}
+
+function dayLabel(dateStr, i) {
+  if (i === 0) return 'Сегодня';
+  if (i === 1) return 'Завтра';
+  return new Date(dateStr + 'T12:00:00')
+    .toLocaleDateString('ru-RU', { weekday: 'long' })
+    .replace(/^./, c => c.toUpperCase());
+}
+
 function switchTab(tab) {
   state.tab = tab;
   document.querySelectorAll('.tab-item').forEach(el => {
@@ -432,7 +531,10 @@ searchInput.addEventListener('input', (e) => {
   if (q.length < 2) { searchResults.innerHTML = ''; return; }
   searchTimer = setTimeout(async () => {
     try {
-      const results = await searchCitiesAPI(q);
+      const url = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(q)}&count=8&language=ru&format=json`;
+      const r = await fetch(url);
+      const data = await r.json();
+      const results = data.results || [];
       if (!results.length) {
         searchResults.innerHTML = '<div style="padding:16px;text-align:center;color:#554B68;font-size:14px">Города не найдены</div>';
         return;
@@ -467,12 +569,10 @@ document.getElementById('searchModal').addEventListener('click', (e) => {
   if (e.target.id === 'searchModal') closeSearch();
 });
 
-// Автообновление каждые 60 секунд
 setInterval(() => {
   if (!state.loading && state.tab === 'today') loadWeather();
 }, 60000);
 
-// Запуск
 loadWeather();
 </script>
 </body>
